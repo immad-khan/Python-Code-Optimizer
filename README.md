@@ -36,8 +36,8 @@ npm run preview  # preview production build
 
 ## Key files
 
-- `src/engine/engine.py` — Python analysis/optimization/verification/benchmark pipeline (runs in Pyodide).
-- `src/engine/pyodide.worker.ts` — Web Worker bootstrap; loads Pyodide and calls `run_pipeline`.
+- `src/engine/engine_01_foundation.py` … `engine_05_pipeline.py` — Python analysis/optimization/verification/benchmark pipeline, split by concern and loaded in order in the same Pyodide namespace.
+- `src/engine/pyodide.worker.ts` — Web Worker bootstrap; loads Pyodide and executes engine parts in order, then calls `run_pipeline`.
 - `src/engine/useOptimizer.ts` — React hook for worker lifecycle, timeout, logs, and results.
 - `src/engine/types.ts` — worker/result TypeScript contract.
 - `src/App.tsx`, `src/components/*` — UI.
@@ -45,4 +45,4 @@ npm run preview  # preview production build
 
 ## Known gaps
 
-The engine exposes its known gaps in the result payload (`known_gaps`) and rule metadata (`rules`). See `RULES` and `KNOWN_GAPS` in `src/engine/engine.py` for the current source of truth.
+The engine exposes its known gaps in the result payload (`known_gaps`) and rule metadata (`rules`). See `RULES` and `KNOWN_GAPS` in `src/engine/engine_03_rules.py` for the current source of truth.
