@@ -1858,11 +1858,6 @@ def purity_problem(fn, memo=False, tags=None):
     return None
 
 
-def arg_is_hashable_name(name, scope):
-    """`name` is provably a list of hashable scalars (or we guard it at runtime)."""
-    return name
-
-
 # ---- strict differential testing ----------------------------------------------
 def _run_isolated(f, args):
     """call f(*args) with stdout captured; never raises"""
@@ -7226,9 +7221,13 @@ def run_pipeline(source, stdin="", hints=""):
     items = [{"title": c.title, "status": c.status, "rule": c.rule, "function": c.fn,
               **(c.verification or {"method": "none", "inputs": 0, "valid": 0, "exception_parity": 0})} for c in changes]
     app_items = [i for i in items if i["status"] == "applied"]
+    per_candidate_verified = [c for c in applied if c.verification and c.verification.get("method") not in (None, "none")]
+    cleanup_only_applied = [c for c in applied if not (c.verification and c.verification.get("method") not in (None, "none"))]
     out["verification"] = {
         "applied": len(applied), "reverted": len(rejected), "suggested": len(suggested), "inconclusive": len(inconclusive),
         "skipped": len(skipped),
+        "per_candidate_verified": len(per_candidate_verified),
+        "cleanup_only_applied": len(cleanup_only_applied),
         "normal_runs_min": min((i["valid"] for i in app_items), default=None),
         "normal_runs_total": sum(i["valid"] for i in items),
         "both_raised_total": sum(i["exception_parity"] for i in items),
@@ -7297,6 +7296,12 @@ def run_pipeline(source, stdin="", hints=""):
         "converged": bool(out.get("gate", {}).get("converged", True)),
         "final_verification_ok": out["final_verification"]["ok"],
         "final_verification_functions": [f["name"] for f in out["final_verification"]["functions"]],
+        "per_candidate_verified": out["verification"].get("per_candidate_verified", 0),
+        "cleanup_only_applied": out["verification"].get("cleanup_only_applied", 0),
+        "verification_scope": (
+            "per-candidate rewrites are differentially tested before applying; "
+            "cleanup-only rewrites have no per-candidate differential test and rely on final end-to-end verification of changed functions"
+        ),
         "consistency": {nm: c.get("status") for nm, c in (out.get("consistency_by_fn") or {}).items()},
         "has_run_error": bool(out["optimized"].get("run", {}).get("error") or out["original"]["run"].get("error")),
     }

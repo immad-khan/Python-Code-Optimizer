@@ -121,6 +121,8 @@ export interface VerificationSummary {
   suggested: number;
   inconclusive?: number;
   skipped?: number;
+  per_candidate_verified?: number;
+  cleanup_only_applied?: number;
   normal_runs_min: number | null;
   normal_runs_total: number;
   both_raised_total: number;
@@ -168,6 +170,9 @@ export interface Protocol {
   converged: boolean;
   final_verification_ok: boolean;
   final_verification_functions: string[];
+  per_candidate_verified?: number;
+  cleanup_only_applied?: number;
+  verification_scope?: string;
   consistency: Record<string, string>;
   has_run_error: boolean;
 }
