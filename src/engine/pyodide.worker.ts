@@ -1,6 +1,12 @@
 /// <reference lib="webworker" />
-import engineSource from "./engine.py?raw";
+import enginePart1 from "./engine_01_foundation.py?raw";
+import enginePart2 from "./engine_02_runtime.py?raw";
+import enginePart3 from "./engine_03_rules.py?raw";
+import enginePart4 from "./engine_04_optimize.py?raw";
+import enginePart5 from "./engine_05_pipeline.py?raw";
 import type { WorkerIn, WorkerOut } from "./types";
+
+const ENGINE_PARTS = [enginePart1, enginePart2, enginePart3, enginePart4, enginePart5];
 
 const PYODIDE_VERSION = "0.26.4";
 const PYODIDE_BASE = `https://cdn.jsdelivr.net/pyodide/v${PYODIDE_VERSION}/full/`;
@@ -35,7 +41,9 @@ async function ensurePyodide() {
           /* ignore */
         }
       });
-      py.runPython(engineSource);
+      for (const part of ENGINE_PARTS) {
+        py.runPython(part);
+      }
       pyodide = py;
       return py;
     })();
