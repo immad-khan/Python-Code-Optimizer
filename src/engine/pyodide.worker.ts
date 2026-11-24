@@ -56,7 +56,11 @@ self.onmessage = async (e: MessageEvent<WorkerIn>) => {
       const run = py.globals.get("run_pipeline");
       const json: string = run(msg.code, msg.stdin ?? "", msg.hints ?? "");
       run.destroy?.();
-      post({ type: "result", id: msg.id, result: JSON.parse(json) });
+      const parsed: unknown = JSON.parse(json);
+      if (!parsed || typeof parsed !== "object" || typeof (parsed as { ok?: unknown }).ok !== "boolean") {
+        throw new Error("Engine returned an invalid result payload.");
+      }
+      post({ type: "result", id: msg.id, result: parsed as import("./types").PipelineResult });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

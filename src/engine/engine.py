@@ -1858,11 +1858,6 @@ def purity_problem(fn, memo=False, tags=None):
     return None
 
 
-def arg_is_hashable_name(name, scope):
-    """`name` is provably a list of hashable scalars (or we guard it at runtime)."""
-    return name
-
-
 # ---- strict differential testing ----------------------------------------------
 def _run_isolated(f, args):
     """call f(*args) with stdout captured; never raises"""
@@ -4665,25 +4660,22 @@ def calibrate_n(fn, tags, target=0.003, start=16, cap=4096, exp_like=False):
     return min(n, cap)
 
 
-def ab_compare(fa, fb, tags, n, reps=2, min_time=0.002):
-    """Interleaved A/B/B/A timing at one size.  ratio = time(A)/time(B) (>1 means B is faster)."""
-    factory = lambda: make_args(tags, n, 1000 + n)  # noqa: E731
-    ta, tb = [], []
-    for r in range(reps):
-        if r % 2 == 0:
-            ta.append(time_call(fa, factory, min_time=min_time, batches=2))
-            tb.append(time_call(fb, factory, min_time=min_time, batches=2))
-        else:
-            tb.append(time_call(fb, factory, min_time=min_time, batches=2))
-            ta.append(time_call(fa, factory, min_time=min_time, batches=2))
-    a, b = min(ta), min(tb)
-    spread = max((_median(ta) - a) / a if a > 0 else 0.0, (_median(tb) - b) / b if b > 0 else 0.0)
-    return {"ratio": (a / b) if b > 0 else None, "noise": spread, "n": n, "a": a, "b": b}
+def _guard_argsets(tags, n):
+    """Small, deterministic argset pool for in-loop regression guards.
+    bench_pair deepcopies every call, so the same logical inputs are safe to reuse."""
+    n = max(1, int(n))
+    return [make_args(tags, n, 1000 + n + j) for j in range(4)]
 
 
 def ab_guard(cur_src, new_src, fn_name, tags, exp_like=False):
+    """Fast in-loop regression guard using the same measurement discipline as bench_pair.
+
+    Returns {ratio, noise, n, a, b} where ratio = median(orig)/median(opt) (>1 means faster),
+    and noise is the MAD-based relative spread of per-round ratios.  None means unmeasurable."""
     try:
-        na, nb = load_namespace(cur_src), load_namespace(new_src)
+        na, nb = load_namespace(cur_src, "__guard_a__"), load_namespace(new_src, "__guard_b__")
+        if na is None or nb is None:
+            return None
         fa, fb = na.get(fn_name), nb.get(fn_name)
         if not callable(fa) or not callable(fb):
             return None
@@ -4691,32 +4683,30 @@ def ab_guard(cur_src, new_src, fn_name, tags, exp_like=False):
         n = calibrate_n(fa, tags, exp_like=exp_like)
         if n is None:
             return None
-        return ab_compare(fa, fb, tags, n)
+        argsets = _guard_argsets(tags, n)
+        # Guard profile: same primitive/discipline as bench_pair, cheaper budget.
+        row = bench_pair(fa, fb, argsets, rounds=5, warm=1, min_sample=0.003,
+                         ns_a=na, ns_b=nb, budget=0.35)
+        ratio = row.get("ratio")
+        if not ratio:
+            return None
+        return {"ratio": ratio, "noise": float(row.get("spread") or 0.0),
+                "n": n, "a": row.get("a"), "b": row.get("b")}
     except Exception:
         return None
 
 
-def paired_benchmark(fa, fb, tags, sizes, a_times, budget=1.5):
-    """Time A and B interleaved at every size.  Returns (pts_a, pts_b, spreads)."""
-    pts_a, pts_b, spreads = [], [], []
-    start = time.perf_counter()
-    for n, t_hint in zip(sizes, a_times):
-        if time.perf_counter() - start > budget and len(pts_a) >= 4:
-            break
-        factory = lambda n=n: make_args(tags, n, 1000 + n)  # noqa: E731
-        reps = 3 if t_hint < 0.02 else (2 if t_hint < 0.1 else 1)
-        ta, tb = [], []
-        for r in range(reps):
-            if r % 2 == 0:
-                ta.append(time_call(fa, factory, min_time=0.004, batches=2)); tb.append(time_call(fb, factory, min_time=0.004, batches=2))
-            else:
-                tb.append(time_call(fb, factory, min_time=0.004, batches=2)); ta.append(time_call(fa, factory, min_time=0.004, batches=2))
-        a, b = min(ta), min(tb)
-        pts_a.append((n, a)); pts_b.append((n, b))
-        spreads.append((_median(ta) - a) / a if a > 0 else 0.0)
-        _progress("bench", f"[A/B] n={n}: original {a*1000:.3f} ms · optimized {b*1000:.3f} ms · {a/b if b else 0:.2f}×",
-                  {"which": "paired", "n": n})
-    return pts_a, pts_b, spreads
+def ab_guard_regression(ab):
+    """True when an ab_guard result shows a measurable slowdown.
+
+    Uses the same spread semantics as bench_pair (MAD of per-round ratios): reject only when
+    the candidate is at least 10% slower AND the slowdown is outside 3*spread (3% floor).
+    This keeps the guard conservative while aligning its decision with the reported benchmark."""
+    if not ab or not ab.get("ratio"):
+        return False
+    ratio = float(ab["ratio"])
+    spread = max(float(ab.get("noise") or 0.0), 0.03)
+    return ratio <= 1.0 / 1.10 and ratio < 1.0 / (1.0 + 3.0 * spread)
 
 
 # ---- rule library metadata (shown in the UI; nothing here is marketing — see KNOWN_GAPS) ----
@@ -6581,19 +6571,19 @@ def optimize(source, fn_types, program_stdout, program_fast, hints=None):
                         if ok and fn_name and fn_name in fn_types:
                             with _quiet():
                                 ab = ab_guard(current, new_src, fn_name, fn_types[fn_name], exp_like=orig_exp)
-                            if ab and ab["ratio"] and ab["ratio"] < 0.9 - 2 * ab["noise"] and tname not in PORTABLE_RULES:
+                            if ab_guard_regression(ab) and tname not in PORTABLE_RULES:
                                 saved = dict(STRATEGY)
                                 set_strategy(list="unique", secondary="half", primary="n")
                                 with _quiet():
                                     ab2 = ab_guard(current, new_src, fn_name, fn_types[fn_name], exp_like=orig_exp)
                                 STRATEGY.update(saved)
-                                if ab2 and ab2["ratio"] and ab2["ratio"] >= 0.9 - 2 * ab2["noise"]:
+                                if ab2 and ab2.get("ratio") and not ab_guard_regression(ab2):
                                     notes.append(f"{change.title}: slower on the worst-case input shape ({1 / ab['ratio']:.2f}× slower) "
                                                  f"but {ab2['ratio']:.2f}× faster on the default shape — kept")
                                     ab = ab2
                                 else:
                                     ok = False
-                                    msg = (f"measured {1 / ab['ratio']:.2f}× SLOWER at n={ab['n']} (noise ±{ab['noise'] * 100:.0f}%) "
+                                    msg = (f"measured {1 / ab['ratio']:.2f}× SLOWER at n={ab['n']} (spread ±{ab['noise'] * 100:.1f}%) "
                                            "on both the worst-case and default input shapes — rejected by the regression guard")
                         change.verification = ver
                         change.ab = ({"ratio": ab["ratio"], "noise": ab["noise"], "n": ab["n"]} if ab and ab["ratio"] else None)
@@ -7231,9 +7221,13 @@ def run_pipeline(source, stdin="", hints=""):
     items = [{"title": c.title, "status": c.status, "rule": c.rule, "function": c.fn,
               **(c.verification or {"method": "none", "inputs": 0, "valid": 0, "exception_parity": 0})} for c in changes]
     app_items = [i for i in items if i["status"] == "applied"]
+    per_candidate_verified = [c for c in applied if c.verification and c.verification.get("method") not in (None, "none")]
+    cleanup_only_applied = [c for c in applied if not (c.verification and c.verification.get("method") not in (None, "none"))]
     out["verification"] = {
         "applied": len(applied), "reverted": len(rejected), "suggested": len(suggested), "inconclusive": len(inconclusive),
         "skipped": len(skipped),
+        "per_candidate_verified": len(per_candidate_verified),
+        "cleanup_only_applied": len(cleanup_only_applied),
         "normal_runs_min": min((i["valid"] for i in app_items), default=None),
         "normal_runs_total": sum(i["valid"] for i in items),
         "both_raised_total": sum(i["exception_parity"] for i in items),
@@ -7302,6 +7296,12 @@ def run_pipeline(source, stdin="", hints=""):
         "converged": bool(out.get("gate", {}).get("converged", True)),
         "final_verification_ok": out["final_verification"]["ok"],
         "final_verification_functions": [f["name"] for f in out["final_verification"]["functions"]],
+        "per_candidate_verified": out["verification"].get("per_candidate_verified", 0),
+        "cleanup_only_applied": out["verification"].get("cleanup_only_applied", 0),
+        "verification_scope": (
+            "per-candidate rewrites are differentially tested before applying; "
+            "cleanup-only rewrites have no per-candidate differential test and rely on final end-to-end verification of changed functions"
+        ),
         "consistency": {nm: c.get("status") for nm, c in (out.get("consistency_by_fn") or {}).items()},
         "has_run_error": bool(out["optimized"].get("run", {}).get("error") or out["original"]["run"].get("error")),
     }
